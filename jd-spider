@@ -72,10 +72,3 @@ def main():
 
 if __name__=='__main__':
     main()
-    
-
-
-#edata=etree.HTML(response)
-#data=edata.xpath(xpath)
-#print(data)
-##print(etree.tostring(data))
