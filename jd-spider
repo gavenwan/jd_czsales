@@ -1,0 +1,81 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Nov  3 16:29:06 2019
+
+@author: Gaven Wan
+@BLOG：www.wanxiaowen.com
+"""
+
+import requests
+import csv
+import json
+import time
+from requests.exceptions import ReadTimeout,HTTPError,RequestException
+opentime=[12,18,19] #定义采集时间每天12点，18点，19点采集一次
+
+def getnum():
+    # 定义采集的一些基本参数，特别是para和headers是必须的，京东反爬必须
+    url='https://item.jd.com/100005207839.html'
+    para={'callback': 'fetchJSON_comment98vv108','productId': '100005207839','score': '0','sortType': '5','page': '0','pageSize': '10','isShadowSku': '0','fold': '1'}
+    jsonurl='https://sclub.jd.com/comment/productPageComments.action?'
+    headers={
+    'Referer': 'https://item.jd.com/100005207839.html',
+    'Sec-Fetch-Mode': 'no-cors',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.87 Safari/537.36'
+    }
+    
+    try:
+        response=requests.get(jsonurl,params=para,headers=headers)
+        print(response.status_code)
+        time.sleep(2)
+    except ReadTimeout:
+        print('timeout')
+    except HTTPError:
+        print('httperror')
+    except RequestException:
+        print('reqerror')
+    
+    jdata=response.text[25:-2]
+    print(type(jdata))
+    time.sleep(1)
+    jsondata=json.loads(jdata)
+    print(type(jsondata))
+    time.sleep(1)
+    
+    comments=jsondata['comments'] #此处为评论数据，格式为列表，本程序未用。
+    sumary=jsondata['productCommentSummary'] #此处为评论总览数据，本次只取了评论总数和好评总数
+    salesnum=sumary['commentCount'] #评论总数
+    goodnum=sumary['goodCount'] #好评总数
+    
+    #写入到文件
+    with open ('jd-cz.csv',"a+",newline='') as file:
+        csv_file=csv.writer(file)
+        datas=[time.localtime().tm_mon,time.localtime().tm_mday,salesnum,goodnum]
+        csv_file.writerow(datas)
+        print('writing...')
+        file.close()
+        print('closed... ' )
+        time.sleep(3600)
+            
+    return salesnum,goodnum
+
+
+def main():
+        while True:
+            print('wait for start %s %s' % (time.localtime().tm_hour,time.localtime().tm_min))
+            time_now=time.localtime().tm_hour
+            if time_now in opentime: #只有在指定的时间内才去取数据
+                print('start')
+                getnum()
+            else:
+                time.sleep(3600) #每小时检查一次
+
+if __name__=='__main__':
+    main()
+    
+
+
+#edata=etree.HTML(response)
+#data=edata.xpath(xpath)
+#print(data)
+##print(etree.tostring(data))
