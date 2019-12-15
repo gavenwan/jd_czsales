@@ -1,0 +1,542 @@
+# -*- coding:UTF-8 -*-
+
+#库定义
+from pynput import keyboard
+import os
+import serial.tools.list_ports
+import time
+import serial
+from crcmod import mkCrcFun
+from binascii import unhexlify
+import threading
+
+#全局变量与固定量定义
+author='''
+# IAI 电缸/单轴机械手 MODBUS控制
+# V1.0 Macos Windows Acon/Pcon/Scon
+# 万晓文 15221087121
+# 源码下载：www.wanxiaowen.com
+# 目前只提供运动测试功能，参数修改等因为涉及IAI商业机密所以不能开放此功能
+
+# IAI Modbus Control Sample
+# V1.0 Macos Windows Acon/Pcon/Scon
+# By Wan Xiaowen 15221087121
+# Download Source：www.wanxiaowen.com
+# move-test only;parameters-modify is not opened due to IAI business secrects
+'''
+menu='''
+		            欢迎使用IAI-MODBUS程序				
+
+********************************************************************************
+输入字符选择对应的功能，注意大小写！
+********************************************************************************
++-选择串口			=-选择轴号			D-数值移动
+K-开关伺服			H-原点复位			F-刷新界面
+C-报警复位			←↑→↓Jog+-			/-作者信息
+********************************************************************************
+当前串口：%.5s			当前轴号：%s			手动模式：%s
+急停状态：%s			报警状态：%s			伺服状态：%s
+原点状态：%s			定位完成：%s			当前位置：%s
+********************************************************************************
+\n
+%s
+'''
+comlist=[]#全局-com端口号
+ComNo=''#全局-当前COM口号
+axislist=[]#全局-可用轴号
+AxisNo=''#全局-当前轴号
+status={
+    'axisno':'',
+    'position':False,
+    'alarm':False,
+    'sv':False,
+    'emgs':False,
+    'hend':False,
+    'svcmd':False,
+    'mode':False,
+    'safespeed':False,
+    'pwr':False,
+    'stp':False,
+    'pend':False,
+    'moving':False}#当前轴的状态字典
+ser='' #串口通讯名称
+timeout=0.5 #串口失败时间
+baudrate=38400 #串口速度12800,38400,
+bytesize=8 #串口字节
+stopbits=1 #串口停止位
+parity=serial.PARITY_NONE#无校验 PARITY_EVEN#偶校验 PARITY_ODD#奇校验
+cmdlist={
+    'rd':'050427FF00',
+    'read_position':'0390000002',
+    'sv_on':'050403FF00',
+    'sv_off':'0504030000',
+    'home_on':'05040BFF00',
+    'home_off':'05040B0000',
+    'read_9008':'0390080002',
+    'read_9005':'0390050001',
+    'rls_alarm_on':'050407FF00',
+    'rls_alarm_off':'0504070000',
+    'forward_on':'050416FF00',
+    'forward_off':"0504160000",
+    'back_on':'050417FF00',
+    'back_off':'0504170000',
+    'pio_off':'050427FF00',
+    'pio_on':'0504270000',
+    'alarmcode':'0390020001'} #常用命令，rd是测试字符串
+lock = threading.RLock() #定位锁，发送与接受函数同时只允许一个进程访问
+sysversion='win'#默认系统是windows
+cmd_cls={'win':'cls','mac':'clear'}
+
+#测试系统版本Win/Mac
+def testsysversion():
+    global sysversion
+    a=os.system('cls')
+    b=os.system('clear')
+    if a==0 and b!=0:
+        sysversion='win'
+    elif b==0 and a!=0:
+        sysversion='mac'
+    else:
+        print('未能检测出当前操作系统版本')
+    print(sysversion)
+
+#主屏幕打印
+def printmenu(stext='',refresh=True):
+    global ComNo,AxisNo,status
+    os.system(cmd_cls[sysversion])
+    print('\x1b[2J',end='')
+    print("\x1b[?5l",end='')
+    if ComNo!='' and AxisNo!='' and refresh==True:
+        gain_port()
+        gain_position()
+        print(menu % (ComNo,AxisNo,status['mode'],status['emgs'],status['alarm'],status['sv'],status['hend'],status['pend'],status['position'],stext))
+    else:
+        print(menu % (ComNo,AxisNo,status['mode'],status['emgs'],status['alarm'],status['sv'],status['hend'],status['pend'],status['position'],stext))
+
+#列出COM口并选择
+def list_com():
+    global comlist,ComNo,ser
+    while True:
+        printmenu(author)
+        printmenu('***请用通讯线连接IAI控制器并确认已经安装COM口驱动***\n',refresh=False)
+        time.sleep(0.5)
+        _comlist = list(serial.tools.list_ports.comports())
+        if len(_comlist) == 0:
+            printmenu('***计算机找不到串口***',refresh=False)
+            printmenu('***请用PC通讯线连接IAI控制器...',refresh=False)
+            continue
+        else:
+            printmenu('计算机找到可以通讯的COM口如下：')
+            for i in range(0,len(_comlist)):
+                comlist.append(list(_comlist[i])[0])
+                print(i,_comlist[i][0])
+            # printmenu(str(i)+_comlist[i][0],refresh=False)
+            _n_in=input('\n请选择上述一个COM口进行通讯\n端口号为：')
+            try:
+                _n_in=int(_n_in)
+            except:
+                continue
+            if _n_in not in range(0,len(comlist)):
+                printmenu('***输入的端口号不在上述列表中系统重新检索COM口后请重新输入***')
+                time.sleep(2)
+                continue
+            else:
+                printmenu('***你选择的COM口号为COM{0}'.format(comlist[_n_in]))
+                ComNo=comlist[_n_in]
+                time.sleep(0.5)
+                printmenu('****正在打开通讯****\n\n串口为COM {0} \n波特率为 {1} \n字节 {2} \n停止位 {3} \n超时{4}'.format(ComNo,baudrate,bytesize,stopbits,timeout))
+                print('****正在打开通讯****')
+                try:
+                    ser=serial.Serial(port=ComNo)
+                    ser.baudrate=baudrate
+                    ser.bytesize=bytesize
+                    ser.stopbits=stopbits
+                    ser.parity=parity
+                    ser.timeout=timeout
+                    if ser.isOpen():
+                        printmenu('串口 {0} 已经打开..'.format(ComNo))
+                        time.sleep(3)
+                        break
+                except:
+                    printmenu('端口未能打开，重试...')
+                    continue
+    printmenu()
+    return True
+
+# 发送接受函数
+def inout(axis,outstr):
+    global ser
+    lock.acquire()#加锁
+    try:
+        _outcommand=bytes.fromhex(crc16Add(axis+outstr))
+        #print('发送的数据为：',_outcommand)
+        #print('发送的二进制数据为：'+_outcommand.hex())
+        ser.write(_outcommand)
+    finally:
+        pass
+    time.sleep(0.02)
+    _instr=None
+    # while ser.inWaiting()>0:
+        # myout=ser.read(50)#读取串口传过来的字节流
+    _instr=ser.readline()
+    #print('接受到的数据为：',_instr)
+    #print('接收的二进制数据为：'+_instr.hex())
+    lock.release()#释放锁
+    return _instr.hex()
+
+#查找所有可连接的轴
+def list_axis():
+    global axislist,ComNo,AxisNo
+    axislist=[]
+    _list=['01','02','03','04','05','06','07','08','09','0a','0b','0c','0d','0e','0f','10']
+    while len(axislist)==0:
+        for n in _list:
+            feedback=inout(n,cmdlist['rd'])
+            print('\r尝试连接 第%s轴' % n,end='')
+            time.sleep(0.5)
+            if len(feedback)!=0:
+                axislist.append(n)
+                print('\r第%s轴 已连接' % n,end='')
+                time.sleep(0.5)
+            else:
+                print('\r第%s轴 通讯失败' % n,end='')
+    printmenu('已经连接的控制器如下：',refresh=False)
+    for n in axislist:
+        print('第%s轴已连接..' % n)
+    while True:
+        _AxisNo='0'+input('\n请输入要连接的轴号(1-10,a-f字母小写)：')
+        if _AxisNo in axislist:
+            AxisNo=_AxisNo
+            break
+        else:
+            continue
+    printmenu('第%s轴已经连接' % AxisNo)
+    return True
+
+#把十进制处理为8bit的16进制
+def tohex(pnum):
+    pnum=list(hex(pnum).upper())#取16进制
+    pnum=pnum[2:]#去掉0x符号
+    pnum=''.join(pnum)#重新组合
+    pnum=pnum.zfill(8)#补齐8位
+    pnum_H=pnum[0:4]#前4位为高位
+    pnum_L=pnum[4:8]#后4位为低位
+    return pnum_H+pnum_L
+
+#直接按给定位置、速度、加速度移动
+def Dmove(axis,position=0,speed=10,acc=10):
+    #把位置数据格式化
+    position_H=tohex(int(position*100))[0:4]
+    position_L=tohex(int(position*100))[4:8]
+    #把速度数据格式化
+    speed_H=tohex(speed*100)[0:4]
+    speed_L=tohex(speed*100)[4:8]
+    #加速度格式化
+    acc=tohex(acc)[4:8]
+    #组合为移动控制命令
+    movestr='10'+'9900'+'0009'+'12'+position_H+position_L+'0000'+'000A'+speed_H+speed_L+acc+'0000'+'0000'
+    inout(axis,movestr)
+    return True
+
+#键盘监听事件-键盘按下
+def on_press(key):
+    global status
+    try:
+        # print('alphanumeric key {0} pressed'.format(key.char))
+        if key.char=='+':
+            list_com()
+        elif key.char=='=':
+            list_axis()
+        elif key.char=='D':
+            directmove()
+        elif key.char=='K':
+            svonoff()
+        elif key.char=='H':
+            home()
+        elif key.char=='F':
+            printmenu()
+        elif key.char=='P':
+            gain_position()
+        elif key.char=='O':
+            gain_port()
+        elif key.char=='/':
+            printmenu(author,refresh=False)
+        elif key.char=='C':
+            alarmreset()
+        else:
+            pass
+    except AttributeError:
+        if key==keyboard.Key.left or key==keyboard.Key.up:
+            jogFon()
+        elif key==keyboard.Key.right or key==keyboard.Key.down:
+            jogBon()
+        # print('special key {0} pressed'.format(key))
+
+#键盘监听事件-键盘释放
+def on_release(key):
+    global status
+    #print('{0} released'.format(key))
+    if key == keyboard.Key.esc:
+        # Stop listener
+        return False
+    elif key==keyboard.Key.left or key==keyboard.Key.up:
+        jogFoff()
+    elif key==keyboard.Key.right or key==keyboard.Key.down:
+        jogBoff()
+
+# CRC16-MODBUS
+def crc16Add(read):
+    crc16 =mkCrcFun(0x18005,rev=True,initCrc=0xFFFF,xorOut=0x0000)
+    data = read.replace(" ","")
+    readcrcout=hex(crc16(unhexlify(data))).upper()
+    str_list = list(readcrcout)
+    if len(str_list) == 5:
+        str_list.insert(2,'0') # 位数不足补0
+    crc_data = "".join(str_list)
+    read = read.strip()+' '+crc_data[4:]+' '+crc_data[2:4]
+    return read
+
+#开关伺服
+def svonoff():
+    global AxisNo,status
+    if status['alarm']==True:
+        printmenu('报警/急停中，拒绝开关伺服')
+    else:
+        if status['sv']==True:
+            try:
+                _in=inout(AxisNo,cmdlist['sv_off'])
+                if _in[8:12]=='0000':
+                    printmenu('伺服关闭成功')
+                    return True
+                else:
+                    printmenu('伺服关闭失败，请重试')
+            except:
+                printmenu('伺服开关命令失败，请重试')
+                return False
+        elif status['sv']==False:
+            try:
+                _in=inout(AxisNo,cmdlist['sv_on'])
+                if _in[8:12]=='ff00':
+                    printmenu('伺服开启成功')
+                    return True
+                else:
+                    printmenu('伺服开启失败，请重试')
+            except:
+                printmenu('伺服开关命令失败，请重试')
+                return False
+
+#原点复位
+def home():
+    global AxisNo,status
+    if status['sv']==False:
+        printmenu('尚未开启伺服，不能动作')
+        return False
+    else:
+        _in=inout(AxisNo,cmdlist['home_on'])
+        if _in[8:12]=='ff00':
+            status['moving']=True
+            inout(AxisNo,cmdlist['home_off'])
+            printmenu(refresh=False)
+            return True
+        else:
+            printmenu('回原点失败')
+            return False
+
+#直接数值移动
+def directmove():
+    global AxisNo,status
+    if status['sv']==False or status['hend']==False:
+        printmenu('尚未开启伺服或回原点，请开启伺服并回原点后尝试')
+    else:
+        while True:
+            try:
+                a=float(input('请输入指令位置（例如12.34mm就输入12.34）：'))
+                b=int(input('请输入指令速度（例如500mm/s就输入500）：'))
+                c=int(input('请输入指令加速度（例如0.3G就输入30）：'))
+                break
+            except:
+                print('输入值错误，重新输入')
+                continue
+        Dmove(AxisNo,a,b,c)
+        status['moving']=True
+        # print('正在以%smm/s速度（加速度%sG)向%smm处移动' % (b,str(c/100),a))
+        # printmenu(refresh=False)
+        return True
+
+#获取当前位置
+def gain_position():
+    global AxisNo,status
+    while True:
+        try:
+            _currentposition=inout(AxisNo,cmdlist['read_position'])
+            if _currentposition==None or '':
+                continue
+            else:
+                break
+        except:
+            continue
+    _currentposition=list(_currentposition)[6:14] #取response中间的8位
+    _currentposition=''.join(_currentposition) #组合成一个字符串
+    _currentposition=int('0x'+_currentposition,16) #字符串解析为整数数值
+    status['position']=str(float(_currentposition)/100) #还原为0.01mm的形式
+    # if list(bin(_currentposition))[2]=='1':
+    #     _n1=list(bin(_currentposition))
+    #     n2list=[]
+    #     for n in _n1:
+    #         n2='1' if n=='0' else '0'
+    #         n2list.append(n2) 
+    #     n2=''.join(n2list[2:])
+    #     _currentposition= int('0x'+n2,16)
+    #     status['position']='-'+str(_currentposition/100)
+    # else:
+    #     status['position']=str(float(_currentposition)/100) #还原为0.01mm的形式
+    return True
+
+#获取所有系统状态
+def gain_port():
+    global AxisNo,status
+    _sinput=''
+    #9008H状态
+    while True:
+        try:
+            _sinput=inout(AxisNo,cmdlist['read_9008']) #发送输出状态查询指令
+            if _sinput==None or _sinput=='':
+                continue
+            else:
+                break
+        except:
+            continue
+    _sinput=list(_sinput)[6:14] #取6-13的8位
+    _sinput=''.join(_sinput) #组合成一个字符串
+    _sinput=int('0x'+_sinput,16) #字符串解析为整数数值
+    _sinput=list(bin(_sinput))[2:] #解析为2进制位显示
+    status['MPOW']=True if _sinput[-1]=='1' else False #马达开启
+    status['svcmd']=True if _sinput[-2]=='1' else False #伺服命令
+    status['sv']=True if _sinput[-3]=='1' else False #伺服是否已经开启
+    status['hend']=True if _sinput[-4]=='1' else False #原点是否完成过
+    status['mode']=True if _sinput[-5]=='1' else False #模式状态
+    #9005H状态
+    while True:
+        try:
+            _sinput=inout(AxisNo,cmdlist['read_9005']) #发送输出状态查询指令
+            if _sinput==None or _sinput=='':
+                continue
+            else:
+                break
+        except:
+            continue
+    _sinput=list(_sinput)[6:10] #取反馈状态6-9位
+    _sinput=''.join(_sinput) #组合成一个字符串
+    _sinput=int('0x'+_sinput,16) #字符串解析为整数数值
+    _sinput=list(bin(_sinput)[2:].zfill(16)) #解析为2进制位显示
+    status['emgs']=True if _sinput[0]=='1' else False #急停
+    status['safespeed']=True if _sinput[1]=='1' else False #安全速度
+    status['pwr']=True if _sinput[2]=='1' else False #电源
+    status['alarm']=True if _sinput[5]=='1' else False #报警
+    status['stp']=True if _sinput[10]=='1' else False #暂停
+    status['pend']=True if _sinput[12]=='1' else False #定位完成
+    #报警代码
+    if status['alarm']==True:
+        while True:
+            _sinput=inout(AxisNo,cmdlist['alarmcode']) 
+            if _sinput==None:
+                continue
+            else:
+                _sinput=list(_sinput)[6:10]#取6-10位的反馈数值
+                _sinput=''.join(_sinput) #组合成一个字符串
+                status['alarm']=_sinput #报警状态转为报警代码显示
+                break
+    else:
+        pass
+    return True
+
+#移动中过程
+def onmoving():
+    global AxisNo,status
+    while True:
+        while status['moving']==True:
+            gain_position()
+            print('\r移动中，当前位置：{}'.format(status['position']),end='')
+            try:
+                _instr=inout(AxisNo,'0390070001')#gain 9007H status
+                if _instr==None or '':
+                    continue
+                else:
+                    _instr=list(_instr)[6:10] #取反馈状态6-9位
+                    _instr=''.join(_instr) #组合成一个字符串
+                    _instr=int('0x'+_instr,16) #字符串解析为整数数值
+                    _instr=list(bin(_instr)[2:].zfill(16)) #解析为2进制位显示su
+                    if _instr[-6]=='0': #系统寄存器显示运动结束
+                        status['moving']=False #关闭运动状态
+                        printmenu('运动完成')
+                    else:
+                        continue
+            except:
+                continue
+        continue
+
+#报警复位程序
+def alarmreset():
+    try:
+        inout(AxisNo,cmdlist['rls_alarm_on'])
+        time.sleep(0.5)
+        inout(AxisNo,cmdlist['rls_alarm_off'])
+        gain_port()
+        if status['alarm']:
+            return False
+        elif status['alarm']==False:
+            printmenu('报警复位成功')
+            return True
+        else:
+            pass
+    except:
+        return False
+
+#JOG+-程序
+def jogFon():
+    try:
+        # status['moving']=True
+        inout(AxisNo,cmdlist['forward_on'])
+        inout(AxisNo,cmdlist['forward_off'])
+    except:
+        pass
+def jogFoff():
+    try:
+        gain_position()
+        printmenu(refresh=False)
+    except:
+        pass
+def jogBon():
+    try:
+        # status['moving']=True
+        inout(AxisNo,cmdlist['back_on'])
+        inout(AxisNo,cmdlist['back_off'])
+    except:
+        pass
+def jogBoff():
+    try:
+        gain_position()
+        printmenu(refresh=False)
+    except:
+        pass
+
+
+#主函数
+def main():
+    testsysversion()
+    print("\x1b[?5l",end='')
+    if sysversion=='win':
+        os.popen("mode con cols=84 lines=120")#设置窗口大小，仅在windows下有效
+    else:
+        pass
+    printmenu()#打印主菜单
+    moving=threading.Thread(target=onmoving,name='moving')#后台监控运动子线程
+    moving.setDaemon(True)#主线程消失就终止子线程
+    moving.start()#运动监控线程开始
+    keyboard_listener=keyboard.Listener(on_press=on_press,on_release=on_release)#键盘监听子线程
+    keyboard_listener.start()#开启键盘监听
+    # moving.join()#子线程结束前保持
+    keyboard_listener.join()
+
+if __name__ == "__main__":
+    main()
